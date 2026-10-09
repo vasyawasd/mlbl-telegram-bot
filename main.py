@@ -10,7 +10,7 @@ import socketserver
 
 TOKEN = os.getenv("BOT_TOKEN", "8627499773:AAFmzhJGlJ9gymzTPqKgKJO60QFBsEhO6tQ")
 CHATS_FILE = "chats.json"
-CHECK_INTERVAL_SEC = 1800  # Проверка каждые 30 минут
+CHECK_INTERVAL_SEC = 1800
 
 COMPETITIONS = [
     {"id": 142698, "name": "Элита"},
@@ -65,48 +65,52 @@ def is_group_admin(chat_id: str | int, user_id: int) -> bool:
         pass
     return False
 
-# ponytail: кэш расписания на 10 минут, чтобы не дергать виджет слишком часто
 CAL_CACHE = {}
 CAL_CACHE_TIME = {}
 
 def fetch_mlbl_games(comp_id: int) -> list:
+    """Загружает все матчи дивизиона (и завершенные, и запланированные на 3 месяца) через JSON API."""
     now_ts = time.time()
     if comp_id in CAL_CACHE and now_ts - CAL_CACHE_TIME.get(comp_id, 0) < 600:
         return CAL_CACHE[comp_id]
 
-    url = f"https://reg.infobasket.su/Widget/Calendar/{comp_id}"
+    url = f"https://reg.infobasket.su/Comp/GetCalendar/?comps={comp_id}&format=json"
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://moscow.ilovebasket.ru/"}
     try:
-        html = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).text
+        raw_list = requests.get(url, headers=headers, timeout=10).json()
     except Exception:
         return CAL_CACHE.get(comp_id, [])
 
-    pattern = re.compile(
-        r'<tr[^>]*class=["\']game["\'][^>]*id=["\']game-(\d+)["\'].*?'
-        r'<td[^>]*class=["\']date["\'][^>]*>\s*([0-9.]+)\s*</td>.*?'
-        r'<td[^>]*class=["\']time["\'][^>]*>\s*([0-9:]+)\s*</td>.*?'
-        r'<td[^>]*class=["\']arena["\'][^>]*>\s*([^<]+)\s*</td>.*?'
-        r'<a[^>]*class=["\']team["\'][^>]*>([^<(]+).*?'
-        r'<a[^>]*class=["\']team["\'][^>]*>([^<(]+)',
-        re.DOTALL
-    )
-
     games = []
-    for m in pattern.findall(html):
-        gid, d_str, t_str, arena, t1, t2 = m
+    for g in raw_list:
+        gid = g.get("GameID")
+        d_str = g.get("GameDate", "")
+        t_str = g.get("GameTime", "00:00") or "00:00"
+        arena = g.get("ArenaRu") or "Зал уточняется"
+        t1 = g.get("ShortTeamNameAru") or g.get("TeamNameAru") or ""
+        t2 = g.get("ShortTeamNameBru") or g.get("TeamNameBru") or ""
+        status = g.get("GameStatus", 0)  # 0 = запланирована, 1 = сыграна
+
         try:
-            dt = datetime.strptime(f"{d_str.strip()} {t_str.strip()}", "%d.%m.%Y %H:%M")
+            dt = datetime.strptime(f"{d_str} {t_str}", "%d.%m.%Y %H:%M")
         except Exception:
-            continue
+            dt = datetime.min
+
         games.append({
-            "id": int(gid),
+            "id": gid,
             "datetime": dt,
-            "date_str": d_str.strip(),
-            "time_str": t_str.strip(),
-            "arena": arena.strip(),
+            "date_str": d_str,
+            "time_str": t_str,
+            "arena": arena,
             "team1": t1.strip(),
-            "team2": t2.strip()
+            "team2": t2.strip(),
+            "status": status,
+            "score_a": g.get("ScoreA", 0),
+            "score_b": g.get("ScoreB", 0),
+            "div_name": g.get("LeagueNameRu", "")
         })
 
+    games.sort(key=lambda x: x["datetime"])
     CAL_CACHE[comp_id] = games
     CAL_CACHE_TIME[comp_id] = now_ts
     return games
@@ -119,15 +123,14 @@ def filter_team_games(games: list, team_name: str) -> list:
         is_t2 = q in g["team2"].lower()
         if is_t1 or is_t2:
             form = "⚪️ СВЕТЛАЯ" if is_t1 else "⚫️ ЧЁРНАЯ"
-            res.append({**g, "is_home": is_t1, "form": form})
-    return sorted(res, key=lambda x: x["datetime"])
+            opp = g["team2"] if is_t1 else g["team1"]
+            res.append({**g, "is_home": is_t1, "form": form, "opponent": opp})
+    return res
 
 def auto_find_team(team_name: str, preferred_comp_name: str = ""):
-    """Ищет команду среди всех дивизионов МЛБЛ."""
     q = team_name.lower().strip()
     p_div = preferred_comp_name.lower().strip()
 
-    # Сначала проверяем предпочитаемый дивизион, если указан
     candidates = []
     for c in COMPETITIONS:
         if p_div and p_div not in c["name"].lower():
@@ -135,14 +138,11 @@ def auto_find_team(team_name: str, preferred_comp_name: str = ""):
         games = fetch_mlbl_games(c["id"])
         team_matches = filter_team_games(games, q)
         if team_matches:
-            # Найдена команда
             exact_name = team_matches[0]["team1"] if q in team_matches[0]["team1"].lower() else team_matches[0]["team2"]
             candidates.append((c["id"], c["name"], exact_name))
 
     if candidates:
         return candidates[0]
-
-    # Если с уточнением дивизиона не нашли, ищем по всем
     if p_div:
         return auto_find_team(team_name, "")
     return None
@@ -209,8 +209,8 @@ def reminder_loop():
                 games = filter_team_games(fetch_mlbl_games(comp_id), team)
 
                 for g in games:
-                    # Если игра завтра и о ней еще не напоминали
-                    if g["datetime"].date() == tomorrow and g["id"] not in reminded_ids:
+                    # Напоминаем только о запланированных играх на завтра
+                    if g["status"] == 0 and g["datetime"].date() == tomorrow and g["id"] not in reminded_ids:
                         send_msg(chat_id, f"🔔 *Внимание! Завтра игра:*\n\n{format_card(g, 'Завтра матч', info.get('division'))}")
                         reminded_ids.append(g["id"])
                         changed = True
@@ -232,25 +232,30 @@ def handle_game_query(chat_id: str, query: str = ""):
     games = filter_team_games(fetch_mlbl_games(comp_id), team)
     now = datetime.now()
 
-    # 1. Поиск по конкретной дате (например: /game 15.10 или /game 04.10)
+    # 1. Поиск по дате (например: /game 11.10 или /game 18.10.2026)
     if query:
         matched = [g for g in games if query in g["date_str"]]
         if matched:
             for g in matched:
-                send_msg(chat_id, format_card(g, f"Матч на {g['date_str']}", cfg.get("division")))
+                t_label = "Запланированный матч" if g["status"] == 0 else f"Счёт: {g['score_a']}:{g['score_b']}"
+                send_msg(chat_id, format_card(g, f"{t_label} на {g['date_str']}", cfg.get("division")))
         else:
             send_msg(chat_id, f"На дату `{query}` игр для команды *{team}* не найдено.")
         return
 
-    # 2. Поиск ближайшей будущей игры
-    upcoming = [g for g in games if g["datetime"] >= now]
+    # 2. Поиск ближайшей будущей игры (status == 0)
+    upcoming = [g for g in games if g["status"] == 0 and g["datetime"] >= now]
     if upcoming:
         send_msg(chat_id, format_card(upcoming[0], "Ближайшая игра", cfg.get("division")))
     else:
-        send_msg(chat_id, f"Предстоящих назначенных игр для команды *{team}* пока нет.")
+        # Если по времени игра сегодня/чуть раньше
+        future_or_today = [g for g in games if g["status"] == 0]
+        if future_or_today:
+            send_msg(chat_id, format_card(future_or_today[0], "Ближайшая игра", cfg.get("division")))
+        else:
+            send_msg(chat_id, f"Все запланированные матчи для команды *{team}* уже завершены.")
 
 def start_render_web_server():
-    """Фоновый HTTP-сервер для прохождения проверки порта на Render.com."""
     port = int(os.getenv("PORT", "10000"))
     class QuietHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -293,43 +298,42 @@ def run_bot():
 
                 cfg = load_chats_config()
 
-                # --- 1. СПРАВКА И ПОМОЩЬ ---
+                # --- 1. СПРАВКА ---
                 if cmd in ["/start", "/help"]:
                     if is_private:
                         send_msg(chat_id, (
-                            "👋 Привет! Я бот расписания лиги МЛБЛ Москва (moscow.ilovebasket.ru).\n\n"
-                            "🏀 *Как подключить к вашей команде:*\n"
+                            "👋 Привет! Я бот расписания лиги МЛБЛ Москва.\n\n"
+                            "🏀 *Как подключить:*\n"
                             "1. Добавьте меня в чат вашей команды.\n"
                             "2. Администратор чата должен отправить:\n"
-                            "`/set НазваниеКоманды`\n"
-                            "*(или с дивизионом: `/set Название | Дивизион`)*\n\n"
-                            "Бот автоматически найдет команду, привяжет её и будет присылать напоминания за 1 день до игры!"
+                            "`/set НазваниеКоманды`\n\n"
+                            "Бот сам найдет дивизион команды и будет напоминать о матчах накануне!"
                         ))
                     else:
                         if chat_id in cfg and cfg[chat_id].get("team"):
                             info = cfg[chat_id]
                             send_msg(chat_id, (
-                                f"🏀 Этот чат настроен на команду: *{info['team']}* ({info.get('division', '')}).\n\n"
-                                f"• `/game` — ближайшая игра и цвет формы\n"
-                                f"• `/game 15.10` — игра на конкретную дату\n"
-                                f"• `/schedule` — полное расписание на 3 месяца\n"
-                                f"• Бот сам напомнит о матче за день до игры!"
+                                f"🏀 Чат привязан к: *{info['team']}* ({info.get('division', '')})\n\n"
+                                f"• `/game` — ближайший матч и цвет формы\n"
+                                f"• `/game 11.10` — матч на дату\n"
+                                f"• `/schedule` — календарь матчей на сезон\n"
+                                f"• Напоминания приходят автоматически за 1 день до игры."
                             ))
                         else:
-                            send_msg(chat_id, "👋 Привет! Чтобы настроить бота, администратор чата должен отправить:\n`/set НазваниеКоманды`")
+                            send_msg(chat_id, "👋 Чтобы настроить бота, администратор должен отправить:\n`/set НазваниеКоманды`")
                     continue
 
                 # --- 2. НАСТРОЙКА КОМАНДЫ (ТОЛЬКО ДЛЯ АДМИНИСТРАТОРОВ) ---
                 if cmd.startswith(("/set", "/team")):
                     if not is_private and not is_group_admin(chat_id, user_id):
-                        w_id = send_msg(chat_id, "⛔️ Только администратор этой группы может настраивать или менять команду.")
+                        w_id = send_msg(chat_id, "⛔️ Только администратор этой группы может настраивать команду.")
                         delete_later(chat_id, [w_id, msg.get("message_id")], delay=1.5)
                         continue
 
                     prefix = "/team" if cmd.startswith("/team") else "/set"
                     args = raw_text[len(prefix):].strip()
                     if not args:
-                        send_msg(chat_id, "Укажите команду:\n`/set НазваниеКоманды`\nили:\n`/set НазваниеКоманды | Дивизион`")
+                        send_msg(chat_id, "Укажите команду:\n`/set НазваниеКоманды`")
                         continue
 
                     if "|" in args:
@@ -337,10 +341,9 @@ def run_bot():
                     else:
                         team_in, div_in = args, ""
 
-                    # Автоматический поиск команды в МЛБЛ
                     found = auto_find_team(team_in, div_in)
                     if not found:
-                        send_msg(chat_id, f"❌ Команда `{team_in}` не найдена в расписании МЛБЛ Москва. Проверьте правильность написания названия на moscow.ilovebasket.ru.")
+                        send_msg(chat_id, f"❌ Команда `{team_in}` не найдена в расписании МЛБЛ. Проверьте название на moscow.ilovebasket.ru.")
                         continue
 
                     comp_id, comp_name, exact_team_name = found
@@ -356,12 +359,12 @@ def run_bot():
                         f"✅ Чат успешно привязан!\n\n"
                         f"🏀 Команда: *{exact_team_name}*\n"
                         f"🏆 Дивизион: *{comp_name}*\n\n"
-                        f"• За 1 день до каждого матча сюда придёт автоматическое напоминание.\n"
-                        f"• В любой момент можно написать `/game` (или `/game ДД.ММ`) и `/schedule`."
+                        f"• За 1 день до каждого матча придёт автоматическое напоминание.\n"
+                        f"• Напишите `/game` (или `/game ДД.ММ`) и `/schedule`, чтобы посмотреть календарь."
                     ))
                     continue
 
-                # --- 2.1 ОТВЯЗКА КОМАНДЫ (ТОЛЬКО ДЛЯ АДМИНИСТРАТОРОВ) ---
+                # --- 2.1 ОТВЯЗКА ---
                 if cmd in ["/unset", "/reset"]:
                     if not is_private and not is_group_admin(chat_id, user_id):
                         w_id = send_msg(chat_id, "⛔️ Только администратор этой группы может отвязать команду.")
@@ -377,7 +380,7 @@ def run_bot():
                         send_msg(chat_id, "ℹ️ К этому чату не привязана ни одна команда.")
                     continue
 
-                # --- 3. ЗАПРОС ИГРЫ (ДОСТУПНО ВСЕМ) ---
+                # --- 3. ЗАПРОС ИГРЫ ---
                 if cmd.startswith("/game"):
                     arg = raw_text[5:].strip()
                     handle_game_query(chat_id, arg)
@@ -387,7 +390,7 @@ def run_bot():
                     handle_game_query(chat_id, "")
                     continue
 
-                # --- 4. РАСПИСАНИЕ НА ВЕСЬ СЕЗОН ---
+                # --- 4. КАЛЕНДАРЬ НА СЕЗОН ---
                 if cmd.startswith(("/schedule", "/calendar")):
                     info = cfg.get(chat_id)
                     if not info or not info.get("team"):
@@ -396,13 +399,23 @@ def run_bot():
 
                     games = filter_team_games(fetch_mlbl_games(info["comp_id"]), info["team"])
                     if not games:
-                        send_msg(chat_id, f"Расписание для *{info['team']}* пока не опубликовано.")
+                        send_msg(chat_id, f"Расписание для *{info['team']}* пока не найдено.")
                         continue
 
+                    upcoming = [g for g in games if g["status"] == 0]
+                    finished = [g for g in games if g["status"] == 1]
+
                     lines = [f"📅 *Календарь матчей {info['team']} ({info.get('division', '')}):*\n"]
-                    for g in games:
-                        opp = g["team2"] if info["team"].lower() in g["team1"].lower() else g["team1"]
-                        lines.append(f"• *{g['date_str']}* в *{g['time_str']}* — vs {opp} ({g['form']})")
+                    if upcoming:
+                        lines.append("*⏳ Запланированные матчи:*")
+                        for g in upcoming:
+                            lines.append(f"• *{g['date_str']}* в *{g['time_str']}* — vs {g['opponent']} ({g['form']}) | {g['arena']}")
+                    
+                    if finished:
+                        lines.append("\n*🏁 Завершённые матчи:*")
+                        for g in finished:
+                            lines.append(f"• {g['date_str']} — {g['team1']} {g['score_a']}:{g['score_b']} {g['team2']}")
+
                     send_msg(chat_id, "\n".join(lines))
                     continue
 
