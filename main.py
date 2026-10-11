@@ -8,7 +8,27 @@ from datetime import datetime, timedelta
 import http.server
 import socketserver
 
-TOKEN = os.getenv("BOT_TOKEN", "8627499773:AAFmzhJGlJ9gymzTPqKgKJO60QFBsEhO6tQ")
+def get_bot_token():
+    t = os.getenv("BOT_TOKEN")
+    if not t and os.path.exists(".env"):
+        try:
+            with open(".env", "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("BOT_TOKEN="):
+                        t = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    if not t:
+        try:
+            t = input("Введите токен Telegram-бота (BOT_TOKEN): ").strip()
+            if t:
+                with open(".env", "w", encoding="utf-8") as f:
+                    f.write(f"BOT_TOKEN={t}\n")
+        except Exception:
+            pass
+    return t or ""
+
+TOKEN = get_bot_token()
 CHATS_FILE = "chats.json"
 CHECK_INTERVAL_SEC = 1800
 
@@ -274,6 +294,12 @@ def run_bot():
     print("МЛБЛ Бот запущен...")
     threading.Thread(target=start_render_web_server, daemon=True).start()
     threading.Thread(target=reminder_loop, daemon=True).start()
+
+    # Сбрасываем любые чужие вебхуки и спам
+    try:
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook", json={"drop_pending_updates": True}, timeout=10)
+    except Exception:
+        pass
 
     offset = 0
     while True:
