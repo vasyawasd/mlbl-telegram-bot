@@ -337,8 +337,11 @@ def run_bot():
                 user_id = msg.get("from", {}).get("id", 0)
                 is_private = msg.get("chat", {}).get("type") == "private"
                 raw_text = msg["text"].strip()
-                print(f"📩 [{chat_id}] {raw_text}")
                 cmd = raw_text.split("@")[0].lower()
+
+                # Логируем только команды бота, чтобы не спамить в терминал обычной перепиской
+                if raw_text.startswith("/") or any(w in cmd for w in ["игра", "форма"]):
+                    print(f"🤖 [{chat_id}] {raw_text}")
 
                 cfg = load_chats_config()
 
