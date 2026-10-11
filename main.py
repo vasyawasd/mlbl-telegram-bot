@@ -256,7 +256,7 @@ def handle_game_query(chat_id: str, query: str = ""):
             send_msg(chat_id, f"Все запланированные матчи для команды *{team}* уже завершены.")
 
 def start_render_web_server():
-    port = int(os.getenv("PORT", "10000"))
+    port = int(os.getenv("PORT", "10001"))
     class QuietHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
