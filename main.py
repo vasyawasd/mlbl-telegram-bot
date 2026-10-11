@@ -291,7 +291,10 @@ def start_render_web_server():
         pass
 
 def run_bot():
-    print("МЛБЛ Бот запущен...")
+    if not TOKEN:
+        print("❌ ОШИБКА: Токен бота не найден! Проверьте файл .env")
+        return
+    print(f"МЛБЛ Бот запущен (токен: {TOKEN[:10]}***, длина {len(TOKEN)} симв.)...")
     threading.Thread(target=start_render_web_server, daemon=True).start()
     threading.Thread(target=reminder_loop, daemon=True).start()
 
@@ -453,7 +456,8 @@ def run_bot():
                     send_msg(chat_id, "\n".join(lines))
                     continue
 
-        except Exception:
+        except Exception as e:
+            print(f"❌ Ошибка в цикле: {e}")
             time.sleep(3)
 
 if __name__ == "__main__":
