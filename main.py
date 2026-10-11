@@ -381,8 +381,9 @@ def run_bot():
                     continue
 
                 # --- 3. ЗАПРОС ИГРЫ ---
-                if cmd.startswith("/game"):
-                    arg = raw_text[5:].strip()
+                if cmd.startswith(("/game", "/mlbl")):
+                    prefix = "/mlbl" if cmd.startswith("/mlbl") else "/game"
+                    arg = raw_text[len(prefix):].strip()
                     handle_game_query(chat_id, arg)
                     continue
 
