@@ -2,11 +2,19 @@ import os
 import re
 import time
 import json
+import socket
 import requests
 import threading
 from datetime import datetime, timedelta
 import http.server
 import socketserver
+
+# Принудительно используем IPv4 для Android / Termux (избегаем Errno 101 Network is unreachable)
+try:
+    import urllib3.util.connection as urllib3_cn
+    urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
+except Exception:
+    pass
 
 def get_bot_token():
     t = os.getenv("BOT_TOKEN")
