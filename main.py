@@ -320,6 +320,7 @@ def run_bot():
                 user_id = msg.get("from", {}).get("id", 0)
                 is_private = msg.get("chat", {}).get("type") == "private"
                 raw_text = msg["text"].strip()
+                print(f"📩 [{chat_id}] {raw_text}")
                 cmd = raw_text.split("@")[0].lower()
 
                 cfg = load_chats_config()
