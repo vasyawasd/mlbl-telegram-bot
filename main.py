@@ -310,6 +310,12 @@ def run_bot():
                 timeout=35
             ).json()
 
+            if not r.get("ok"):
+                desc = r.get("description", "Unknown error")
+                print(f"⚠️ Ошибка Telegram API: {desc}")
+                time.sleep(3)
+                continue
+
             for u in r.get("result", []):
                 offset = u["update_id"] + 1
                 msg = u.get("message") or u.get("channel_post")
