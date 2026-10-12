@@ -209,12 +209,43 @@ def delete_msg(chat_id: int | str, message_id: int):
     except Exception:
         pass
 
-def delete_later(chat_id: int | str, message_ids: list, delay: float = 1.5):
+def delete_later(chat_id: int | str, message_ids: list, delay: float = 2.5):
+    """Удаляет список сообщений через delay секунд (в фоне, чтобы не блокировать бота)."""
     def _worker():
         time.sleep(delay)
-        for mid in message_ids:
-            if mid:
-                delete_msg(chat_id, mid)
+        valid_ids = []
+        for m in message_ids:
+            if m:
+                try:
+                    valid_ids.append(int(m))
+                except (ValueError, TypeError):
+                    pass
+        if not valid_ids:
+            return
+
+        # 1. Пробуем удалить всё разом через deleteMessages (Bot API 7.0+)
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TOKEN}/deleteMessages",
+                json={"chat_id": chat_id, "message_ids": valid_ids},
+                timeout=5
+            ).json()
+            if r.get("ok"):
+                return
+        except Exception:
+            pass
+
+        # 2. Поштучное удаление с небольшой паузой
+        for mid in valid_ids:
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{TOKEN}/deleteMessage",
+                    json={"chat_id": chat_id, "message_id": mid},
+                    timeout=5
+                )
+                time.sleep(0.2)
+            except Exception:
+                pass
     threading.Thread(target=_worker, daemon=True).start()
 
 def reminder_loop():
@@ -338,9 +369,10 @@ def run_bot():
                 is_private = msg.get("chat", {}).get("type") == "private"
                 raw_text = msg["text"].strip()
                 cmd = raw_text.split("@")[0].lower()
+                clean_text = raw_text.strip().lower().rstrip("?!.,; ")
 
                 # Логируем только команды бота, чтобы не спамить в терминал обычной перепиской
-                if raw_text.startswith("/") or any(w in cmd for w in ["игра", "форма"]):
+                if raw_text.startswith("/") or clean_text in ["игра", "форма", "когда игра", "какая форма", "расписание"]:
                     print(f"🤖 [{chat_id}] {raw_text}")
 
                 cfg = load_chats_config()
@@ -374,7 +406,7 @@ def run_bot():
                 if cmd.startswith(("/set", "/team")):
                     if not is_private and not is_group_admin(chat_id, user_id):
                         w_id = send_msg(chat_id, "⛔️ Только администратор этой группы может настраивать команду.")
-                        delete_later(chat_id, [w_id, msg.get("message_id")], delay=1.5)
+                        delete_later(chat_id, [w_id, msg.get("message_id")], delay=2.5)
                         continue
 
                     prefix = "/team" if cmd.startswith("/team") else "/set"
@@ -415,7 +447,7 @@ def run_bot():
                 if cmd in ["/unset", "/reset"]:
                     if not is_private and not is_group_admin(chat_id, user_id):
                         w_id = send_msg(chat_id, "⛔️ Только администратор этой группы может отвязать команду.")
-                        delete_later(chat_id, [w_id, msg.get("message_id")], delay=1.5)
+                        delete_later(chat_id, [w_id, msg.get("message_id")], delay=2.5)
                         continue
 
                     if chat_id in cfg:
@@ -434,7 +466,7 @@ def run_bot():
                     handle_game_query(chat_id, arg)
                     continue
 
-                if any(c in cmd for c in ["игра", "форма"]):
+                if clean_text in ["игра", "форма", "когда игра", "какая форма", "расписание"]:
                     handle_game_query(chat_id, "")
                     continue
 
