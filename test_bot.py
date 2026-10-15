@@ -361,7 +361,106 @@ class TestMlblBot(unittest.TestCase):
         self.assertNotIn("-100333", self.mock_config)
         self.assertIn("удалена", mock_send.call_args[0][1])
 
-    # --- 5. Edge cases ---
+    # --- 5. Message deletion logic tests (delete_msg & delete_later) ---
+
+    @patch("main.requests.post")
+    def test_delete_msg_success_and_failure(self, mock_post):
+        mock_resp_ok = MagicMock()
+        mock_resp_ok.json.return_value = {"ok": True}
+        mock_post.return_value = mock_resp_ok
+
+        main.delete_msg("12345", 555)
+        mock_post.assert_called_with(
+            f"https://api.telegram.org/bot{main.TOKEN}/deleteMessage",
+            json={"chat_id": "12345", "message_id": 555},
+            timeout=5
+        )
+
+        mock_post.side_effect = Exception("Network error")
+        try:
+            main.delete_msg("12345", 555)
+        except Exception:
+            self.fail("delete_msg threw an uncaught exception on network error")
+
+    @patch("main.delete_msg")
+    @patch("main.requests.post")
+    def test_delete_later_batch_success(self, mock_post, mock_del_msg):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"ok": True}
+        mock_post.return_value = mock_resp
+
+        with patch("main.threading.Thread") as mock_thread:
+            main.delete_later("12345", [10, 20, "30", None], delay=0)
+            mock_thread.assert_called_once()
+            worker = mock_thread.call_args[1]["target"]
+            worker()
+
+        mock_post.assert_called_once_with(
+            f"https://api.telegram.org/bot{main.TOKEN}/deleteMessages",
+            json={"chat_id": "12345", "message_ids": [10, 20, 30]},
+            timeout=5
+        )
+        mock_del_msg.assert_not_called()
+
+    @patch("main.delete_msg")
+    @patch("main.requests.post")
+    def test_delete_later_fallback_to_individual(self, mock_post, mock_del_msg):
+        mock_resp_fail = MagicMock()
+        mock_resp_fail.json.return_value = {"ok": False, "description": "Not allowed"}
+        mock_post.return_value = mock_resp_fail
+
+        with patch("main.threading.Thread") as mock_thread:
+            with patch("time.sleep"):
+                main.delete_later("12345", [10, 20], delay=0)
+                worker = mock_thread.call_args[1]["target"]
+                worker()
+
+        self.assertEqual(mock_del_msg.call_count, 2)
+        mock_del_msg.assert_any_call("12345", 10)
+        mock_del_msg.assert_any_call("12345", 20)
+
+    # --- 6. Edge cases ---
+
+    @patch("main.send_msg")
+    def test_sender_chat_none_does_not_crash(self, mock_send):
+        msg = {
+            "message_id": 100,
+            "text": "/game",
+            "chat": {"id": -100555, "type": "supergroup"},
+            "sender_chat": None,
+            "from": {"id": 123}
+        }
+        main.process_message(msg)
+        mock_send.assert_called_once()
+
+    @patch("main.send_msg")
+    @patch("main.auto_find_team")
+    def test_anonymous_admin_allowed_in_group(self, mock_find, mock_send):
+        mock_find.return_value = (142698, "Элита", "Рубин")
+        msg = {
+            "message_id": 101,
+            "text": "/set Рубин",
+            "chat": {"id": -100555, "type": "supergroup"},
+            "sender_chat": {"id": -100555},
+            "from": None
+        }
+        main.process_message(msg)
+        self.assertIn("-100555", self.mock_config)
+        self.assertEqual(self.mock_config["-100555"]["team"], "Рубин")
+
+    @patch("main.send_msg")
+    @patch("main.auto_find_team")
+    def test_channel_post_allowed(self, mock_find, mock_send):
+        mock_find.return_value = (142698, "Элита", "Динамо")
+        msg = {
+            "message_id": 102,
+            "text": "/set Динамо",
+            "chat": {"id": -100777, "type": "channel"},
+            "from": None
+        }
+        main.process_message(msg)
+        self.assertIn("-100777", self.mock_config)
+        self.assertEqual(self.mock_config["-100777"]["team"], "Динамо")
 
     @patch("main.send_msg")
     def test_just_slash_and_unknown_command(self, mock_send):
@@ -399,3 +498,4 @@ class TestMlblBot(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

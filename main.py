@@ -45,22 +45,32 @@ try:
 except Exception:
     pass
 
-def get_bot_token():
-    t = os.getenv("BOT_TOKEN")
-    if not t and os.path.exists(".env"):
+def load_env_file():
+    if os.path.exists(".env"):
         try:
             with open(".env", "r", encoding="utf-8") as f:
                 for line in f:
-                    if line.startswith("BOT_TOKEN="):
-                        t = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip('"').strip("'")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
         except Exception:
             pass
+
+load_env_file()
+
+def get_bot_token():
+    t = os.getenv("BOT_TOKEN", "").strip()
     if not t:
         try:
             t = input("Введите токен Telegram-бота (BOT_TOKEN): ").strip()
             if t:
-                with open(".env", "w", encoding="utf-8") as f:
-                    f.write(f"BOT_TOKEN={t}\n")
+                os.environ["BOT_TOKEN"] = t
+                with open(".env", "a", encoding="utf-8") as f:
+                    f.write(f"\nBOT_TOKEN={t}\n")
         except Exception:
             pass
     return t or ""
@@ -178,7 +188,9 @@ def fetch_mlbl_games(comp_id: int) -> list:
     return games
 
 def filter_team_games(games: list, team_name: str) -> list:
-    q = team_name.lower().strip()
+    q = (team_name or "").lower().strip()
+    if not q:
+        return []
     res = []
     for g in games:
         is_t1 = q in g["team1"].lower()
@@ -190,8 +202,10 @@ def filter_team_games(games: list, team_name: str) -> list:
     return res
 
 def auto_find_team(team_name: str, preferred_comp_name: str = ""):
-    q = team_name.lower().strip()
-    p_div = preferred_comp_name.lower().strip()
+    q = (team_name or "").lower().strip()
+    if not q:
+        return None
+    p_div = (preferred_comp_name or "").lower().strip()
 
     candidates = []
     for c in COMPETITIONS:
@@ -256,7 +270,8 @@ def delete_msg(chat_id: int | str, message_id: int):
 def delete_later(chat_id: int | str, message_ids: list, delay: float = 3.0):
     """Удаляет список сообщений через delay секунд (в фоне, чтобы не блокировать бота)."""
     def _worker():
-        time.sleep(delay)
+        if delay > 0:
+            time.sleep(delay)
         valid_ids = []
         for m in message_ids:
             if m:
@@ -282,9 +297,10 @@ def delete_later(chat_id: int | str, message_ids: list, delay: float = 3.0):
             pass
 
         # 2. Поштучное удаление с небольшой паузой
-        for mid in valid_ids:
+        for i, mid in enumerate(valid_ids):
             delete_msg(chat_id, mid)
-            time.sleep(0.3)
+            if i < len(valid_ids) - 1:
+                time.sleep(0.3)
     threading.Thread(target=_worker, daemon=True).start()
 
 def reminder_loop():
@@ -318,7 +334,7 @@ def reminder_loop():
             if changed:
                 save_chats_config(cfg)
         except Exception as e:
-            print(f"⚠️ Ошибка в reminder_loop: {e}")
+            safe_print(f"⚠️ Ошибка в reminder_loop: {e}")
         time.sleep(CHECK_INTERVAL_SEC)
 
 def handle_game_query(chat_id: str, query: str = ""):
@@ -336,7 +352,12 @@ def handle_game_query(chat_id: str, query: str = ""):
             team = cfg["team"]
             comp_id = cfg.get("comp_id")
             games = filter_team_games(fetch_mlbl_games(comp_id), team) if comp_id else []
-            matched = [g for g in games if query.strip() in g["date_str"]]
+            date_clean = query.strip().replace("/", ".")
+            parts = date_clean.split(".")
+            d = parts[0].zfill(2)
+            m = parts[1].zfill(2) if len(parts) > 1 else ""
+            norm_date = f"{d}.{m}" if m else d
+            matched = [g for g in games if g["date_str"].startswith(norm_date)]
             if matched:
                 for g in matched:
                     t_label = "Запланированный матч" if g["status"] == 0 else f"Счёт: {g['score_a']}:{g['score_b']}"
@@ -350,6 +371,10 @@ def handle_game_query(chat_id: str, query: str = ""):
         div_in = ""
         if "|" in team_in:
             team_in, div_in = [x.strip() for x in team_in.split("|", 1)]
+
+        if not team_in:
+            send_msg(chat_id, "Укажите команду или дату:\n`/game НазваниеКоманды`")
+            return
 
         found = auto_find_team(team_in, div_in)
         if found:
@@ -413,6 +438,9 @@ def handle_schedule_query(chat_id: str, query: str = ""):
         div_in = ""
         if "|" in team_in:
             team_in, div_in = [x.strip() for x in team_in.split("|", 1)]
+        if not team_in:
+            send_msg(chat_id, "Укажите название команды:\n`/schedule НазваниеКоманды`")
+            return
         found = auto_find_team(team_in, div_in)
         if not found:
             send_msg(chat_id, f"❌ Команда `{query}` не найдена в расписании МЛБЛ.")
@@ -478,13 +506,16 @@ def process_message(msg: dict):
         if not raw_text.startswith("/"):
             return
 
-        chat_id = str(msg.get("chat", {}).get("id", ""))
+        chat_id = str((msg.get("chat") or {}).get("id", ""))
         if not chat_id:
             return
 
-        user_id = msg.get("from", {}).get("id", 0)
-        is_private = msg.get("chat", {}).get("type") == "private"
-        is_anon_admin = (msg.get("sender_chat", {}).get("id") == msg.get("chat", {}).get("id"))
+        user_id = (msg.get("from") or {}).get("id", 0)
+        chat_type = (msg.get("chat") or {}).get("type", "")
+        is_private = (chat_type == "private")
+        is_channel = (chat_type == "channel")
+        sender_chat_id = (msg.get("sender_chat") or {}).get("id")
+        is_anon_admin = bool(sender_chat_id and str(sender_chat_id) == chat_id)
 
         parts = raw_text.split(None, 1)
         cmd_token = parts[0]
@@ -521,7 +552,7 @@ def process_message(msg: dict):
 
         # --- 2. НАСТРОЙКА КОМАНДЫ (ТОЛЬКО ДЛЯ АДМИНИСТРАТОРОВ) ---
         if cmd in ["/set", "/team"]:
-            if not is_private and not is_anon_admin and not is_group_admin(chat_id, user_id):
+            if not is_private and not is_channel and not is_anon_admin and not is_group_admin(chat_id, user_id):
                 w_id = send_msg(chat_id, "⛔️ Только администратор этой группы может настраивать команду.")
                 delete_later(chat_id, [w_id, msg.get("message_id")], delay=2.5)
                 return
@@ -534,6 +565,10 @@ def process_message(msg: dict):
                 team_in, div_in = [x.strip() for x in args.split("|", 1)]
             else:
                 team_in, div_in = args, ""
+
+            if not team_in:
+                send_msg(chat_id, "Укажите команду:\n`/set НазваниеКоманды`")
+                return
 
             found = auto_find_team(team_in, div_in)
             if not found:
@@ -560,7 +595,7 @@ def process_message(msg: dict):
 
         # --- 2.1 ОТВЯЗКА ---
         if cmd in ["/unset", "/reset"]:
-            if not is_private and not is_anon_admin and not is_group_admin(chat_id, user_id):
+            if not is_private and not is_channel and not is_anon_admin and not is_group_admin(chat_id, user_id):
                 w_id = send_msg(chat_id, "⛔️ Только администратор этой группы может отвязать команду.")
                 delete_later(chat_id, [w_id, msg.get("message_id")], delay=2.5)
                 return
