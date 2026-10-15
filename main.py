@@ -35,6 +35,98 @@ MOSCOW_TZ = timezone(timedelta(hours=3))
 
 def get_moscow_now() -> datetime:
     return datetime.now(MOSCOW_TZ).replace(tzinfo=None)
+
+# Таблица нормализации визуально одинаковых букв (кириллица <-> латиница)
+HOMOGLYPHS = str.maketrans({
+    'a': 'а', 'c': 'с', 'e': 'е', 'k': 'к', 'o': 'о', 'p': 'р', 'x': 'х', 'y': 'у',
+    'A': 'а', 'B': 'в', 'C': 'с', 'E': 'е', 'H': 'н', 'K': 'к', 'M': 'м', 'O': 'о',
+    'P': 'р', 'T': 'т', 'X': 'х', 'Y': 'у',
+    'А': 'а', 'В': 'в', 'С': 'с', 'Е': 'е', 'Н': 'н', 'К': 'к', 'М': 'м', 'О': 'о',
+    'Р': 'р', 'Т': 'т', 'Х': 'х', 'У': 'у'
+})
+
+TRANSLIT_RU_TO_EN = {
+    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e',
+    'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm',
+    'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u',
+    'ф': 'f', 'х': 'kh', 'ц': 'ts', 'ч': 'ch', 'ш': 'sh', 'щ': 'shch',
+    'ъ': '', 'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya'
+}
+
+def translit_ru(s: str) -> str:
+    return "".join(TRANSLIT_RU_TO_EN.get(c, c) for c in (s or "").lower())
+
+def clean_alnum(s: str) -> str:
+    return re.sub(r"[^a-zа-я0-9]", "", (s or "").lower().replace("ё", "е"))
+
+def clean_homo(s: str) -> str:
+    return clean_alnum(s).translate(HOMOGLYPHS)
+
+def match_text(query: str, target: str) -> bool:
+    """Умное сопоставление названий: нечувствительно к пробелам, регистру, тире,
+    визуально одинаковым буквам (кириллица/латиница: X/Х, C/С) и транслитерации."""
+    if not query or not target:
+        return False
+    q_raw, t_raw = query.strip(), target.strip()
+    if not q_raw or not t_raw:
+        return False
+
+    q_low, t_low = q_raw.lower(), t_raw.lower()
+    if q_low == t_low:
+        return True
+
+    cq, ct = clean_alnum(q_raw), clean_alnum(t_raw)
+    if not cq or not ct:
+        return False
+    if cq == ct:
+        return True
+
+    if len(cq) < 3:
+        return q_low in t_low.split() or cq in [clean_alnum(w) for w in t_low.split()]
+
+    if q_low in t_low:
+        return True
+
+    if cq in ct or (len(ct) >= 4 and ct in cq):
+        return True
+
+    hq, ht = clean_homo(q_raw), clean_homo(t_raw)
+    if hq in ht or (len(ht) >= 4 and ht in hq):
+        return True
+
+    tq, tt = clean_alnum(translit_ru(q_raw)), clean_alnum(translit_ru(t_raw))
+    if tq in tt or (len(tt) >= 4 and tt in tq):
+        return True
+
+    words_q = [w for w in re.split(r"[^a-zа-я0-9]+", q_low) if len(w) >= 2 and w not in ("бк", "bc", "team", "команда")]
+    if words_q:
+        all_in = True
+        for w in words_q:
+            hw = clean_homo(w)
+            tw = clean_alnum(translit_ru(w))
+            if hw not in ht and tw not in tt:
+                all_in = False
+                break
+        if all_in:
+            return True
+
+    return False
+
+def parse_team_and_division(text: str) -> tuple:
+    """Разбирает аргумент на (команда, дивизион). Поддерживает '|' и формат в скобках '(Дивизион)'."""
+    text = (text or "").strip()
+    if not text:
+        return "", ""
+    if "|" in text:
+        t, d = text.split("|", 1)
+        return t.strip(), d.strip()
+    m = re.match(r"^(.*?)\s*[\(\[](.*?)[\)\]]$", text)
+    if m:
+        t, d = m.group(1).strip(), m.group(2).strip()
+        if t:
+            return t, d
+    return text, ""
+
 import http.server
 import socketserver
 
@@ -188,13 +280,12 @@ def fetch_mlbl_games(comp_id: int) -> list:
     return games
 
 def filter_team_games(games: list, team_name: str) -> list:
-    q = (team_name or "").lower().strip()
-    if not q:
+    if not team_name:
         return []
     res = []
     for g in games:
-        is_t1 = q in g["team1"].lower()
-        is_t2 = q in g["team2"].lower()
+        is_t1 = match_text(team_name, g["team1"])
+        is_t2 = match_text(team_name, g["team2"])
         if is_t1 or is_t2:
             form = "⚪️ СВЕТЛАЯ" if is_t1 else "⚫️ ЧЁРНАЯ"
             opp = g["team2"] if is_t1 else g["team1"]
@@ -202,24 +293,26 @@ def filter_team_games(games: list, team_name: str) -> list:
     return res
 
 def auto_find_team(team_name: str, preferred_comp_name: str = ""):
-    q = (team_name or "").lower().strip()
-    if not q:
+    parsed_team, parsed_div = parse_team_and_division(team_name)
+    team_name = parsed_team or team_name
+    preferred_comp_name = preferred_comp_name or parsed_div
+
+    if not team_name:
         return None
-    p_div = (preferred_comp_name or "").lower().strip()
 
     candidates = []
     for c in COMPETITIONS:
-        if p_div and p_div not in c["name"].lower():
+        if preferred_comp_name and not match_text(preferred_comp_name, c["name"]):
             continue
         games = fetch_mlbl_games(c["id"])
-        team_matches = filter_team_games(games, q)
+        team_matches = filter_team_games(games, team_name)
         if team_matches:
-            exact_name = team_matches[0]["team1"] if q in team_matches[0]["team1"].lower() else team_matches[0]["team2"]
+            exact_name = team_matches[0]["team1"] if match_text(team_name, team_matches[0]["team1"]) else team_matches[0]["team2"]
             candidates.append((c["id"], c["name"], exact_name))
 
     if candidates:
         return candidates[0]
-    if p_div:
+    if preferred_comp_name:
         return auto_find_team(team_name, "")
     return None
 
@@ -367,10 +460,7 @@ def handle_game_query(chat_id: str, query: str = ""):
             return
 
         # Запрос названия команды (например: /game ЦСКА или /game ЦСКА | Дивизион)
-        team_in = query.strip()
-        div_in = ""
-        if "|" in team_in:
-            team_in, div_in = [x.strip() for x in team_in.split("|", 1)]
+        team_in, div_in = parse_team_and_division(query)
 
         if not team_in:
             send_msg(chat_id, "Укажите команду или дату:\n`/game НазваниеКоманды`")
@@ -434,10 +524,7 @@ def handle_schedule_query(chat_id: str, query: str = ""):
     div_name = ""
 
     if query:
-        team_in = query.strip()
-        div_in = ""
-        if "|" in team_in:
-            team_in, div_in = [x.strip() for x in team_in.split("|", 1)]
+        team_in, div_in = parse_team_and_division(query)
         if not team_in:
             send_msg(chat_id, "Укажите название команды:\n`/schedule НазваниеКоманды`")
             return
@@ -561,10 +648,7 @@ def process_message(msg: dict):
                 send_msg(chat_id, "Укажите команду:\n`/set НазваниеКоманды`")
                 return
 
-            if "|" in args:
-                team_in, div_in = [x.strip() for x in args.split("|", 1)]
-            else:
-                team_in, div_in = args, ""
+            team_in, div_in = parse_team_and_division(args)
 
             if not team_in:
                 send_msg(chat_id, "Укажите команду:\n`/set НазваниеКоманды`")

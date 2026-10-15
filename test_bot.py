@@ -99,6 +99,24 @@ class TestMlblBot(unittest.TestCase):
         self.assertIn("⚪️ СВЕТЛАЯ", card)
         self.assertIn("🏆 *Дивизион:* Элита", card)
 
+    def test_parse_team_and_division(self):
+        self.assertEqual(main.parse_team_and_division("Спартак | Элита"), ("Спартак", "Элита"))
+        self.assertEqual(main.parse_team_and_division("Спартак (Элита)"), ("Спартак", "Элита"))
+        self.assertEqual(main.parse_team_and_division("Спартак [Элита]"), ("Спартак", "Элита"))
+        self.assertEqual(main.parse_team_and_division("БК Путилково"), ("БК Путилково", ""))
+        self.assertEqual(main.parse_team_and_division(""), ("", ""))
+
+    def test_match_text_comprehensive(self):
+        self.assertTrue(main.match_text("HD X Север", "HDXСЕВЕР"))
+        self.assertTrue(main.match_text("HD \u0445 Север", "HDXСЕВЕР"))
+        self.assertTrue(main.match_text("hd x sever", "HDxSEVER WOMEN"))
+        self.assertTrue(main.match_text("БК Путилково", "БК Путилково"))
+        self.assertTrue(main.match_text("Путилково", "БК Путилково"))
+        self.assertTrue(main.match_text("БК Путилково", "Путилково"))
+        self.assertTrue(main.match_text("Спартак-2", "Спартак 2"))
+        self.assertFalse(main.match_text("ЦСКА", "Спартак"))
+        self.assertFalse(main.match_text("а", "Спартак"))
+
     # --- 2. Command handling ---
 
     @patch("main.send_msg")
