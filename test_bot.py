@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone, timedelta
@@ -513,6 +514,150 @@ class TestMlblBot(unittest.TestCase):
         self.assertEqual(mid, 8888)
         self.assertEqual(mock_post.call_count, 2)
         self.assertNotIn("parse_mode", mock_post.call_args_list[1][1]["json"])
+
+class TestMlblResilience(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.test_dir = tempfile.mkdtemp()
+        self.orig_chats_file = main.CHATS_FILE
+        main.CHATS_FILE = os.path.join(self.test_dir, "test_chats.json")
+
+    def tearDown(self):
+        import shutil
+        main.CHATS_FILE = self.orig_chats_file
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_atomic_json_save_and_backup_recovery(self):
+        # 1. Обычное сохранение и чтение
+        test_data = {"12345": {"team": "Спартак", "comp_id": 142698, "enabled": True}}
+        main.save_chats_config(test_data)
+        loaded = main.load_chats_config()
+        self.assertEqual(loaded, test_data)
+
+        # 2. Повторное сохранение создает .bak
+        test_data["12345"]["division"] = "Элита"
+        main.save_chats_config(test_data)
+        self.assertTrue(os.path.exists(main.CHATS_FILE + ".bak"))
+
+        # 3. Повреждаем основной файл
+        with open(main.CHATS_FILE, "w", encoding="utf-8") as f:
+            f.write("{ broken json ...")
+
+        # Автоматическое восстановление из .bak
+        recovered = main.load_chats_config()
+        self.assertIn("12345", recovered)
+        self.assertEqual(recovered["12345"]["team"], "Спартак")
+
+    @patch("main.time.sleep")
+    @patch("main.requests.post")
+    def test_send_msg_429_retry_after(self, mock_post, mock_sleep):
+        resp_429 = MagicMock()
+        resp_429.status_code = 429
+        resp_429.json.return_value = {"ok": False, "error_code": 429, "parameters": {"retry_after": 2}}
+
+        resp_ok = MagicMock()
+        resp_ok.status_code = 200
+        resp_ok.json.return_value = {"ok": True, "result": {"message_id": 999}}
+
+        mock_post.side_effect = [resp_429, resp_ok]
+
+        mid = main.send_msg("12345", "Привет")
+        self.assertEqual(mid, 999)
+        mock_sleep.assert_called_with(3.0)
+
+    @patch("main.requests.post")
+    def test_send_msg_403_kicked_disables_chat(self, mock_post):
+        main.save_chats_config({"88888": {"team": "Спартак", "enabled": True}})
+
+        resp_403 = MagicMock()
+        resp_403.status_code = 403
+        resp_403.json.return_value = {
+            "ok": False,
+            "error_code": 403,
+            "description": "Forbidden: bot was kicked from the supergroup chat"
+        }
+        mock_post.return_value = resp_403
+
+        mid = main.send_msg("88888", "Тест")
+        self.assertIsNone(mid)
+
+        cfg = main.load_chats_config()
+        self.assertFalse(cfg["88888"]["enabled"])
+
+    @patch("main.send_msg")
+    def test_reminder_stages_24h_and_3h_idempotent(self, mock_send):
+        mock_send.return_value = 5001
+        now_msk = main.get_moscow_now()
+
+        # 1 матч через 24 часа, 1 матч через 2 часа
+        dt_24h = now_msk + timedelta(hours=24)
+        dt_3h = now_msk + timedelta(hours=2)
+
+        fake_games = [
+            {
+                "id": 5001,
+                "status": 0,
+                "datetime": dt_24h,
+                "date_str": dt_24h.strftime("%d.%m.%Y"),
+                "time_str": dt_24h.strftime("%H:%M"),
+                "arena": "Арена 1",
+                "team1": "Спартак",
+                "team2": "Соперник 1",
+                "form": "⚪️ СВЕТЛАЯ",
+                "is_home": True,
+                "opponent": "Соперник 1"
+            },
+            {
+                "id": 5002,
+                "status": 0,
+                "datetime": dt_3h,
+                "date_str": dt_3h.strftime("%d.%m.%Y"),
+                "time_str": dt_3h.strftime("%H:%M"),
+                "arena": "Арена 2",
+                "team1": "Соперник 2",
+                "team2": "Спартак",
+                "form": "⚫️ ЧЁРНАЯ",
+                "is_home": False,
+                "opponent": "Соперник 2"
+            }
+        ]
+
+        cfg = {
+            "12345": {
+                "team": "Спартак",
+                "comp_id": 142698,
+                "division": "Элита",
+                "enabled": True,
+                "reminded_stages": []
+            }
+        }
+        main.save_chats_config(cfg)
+
+        with patch("main.fetch_mlbl_games", return_value=fake_games):
+            with patch("main.time.sleep", side_effect=[None, InterruptedError]):
+                try:
+                    main.reminder_loop()
+                except InterruptedError:
+                    pass
+
+        # Должно быть отправлено 2 напоминания (24h и 3h)
+        self.assertEqual(mock_send.call_count, 2)
+
+        saved = main.load_chats_config()
+        stages = saved["12345"]["reminded_stages"]
+        self.assertIn("5001:24h", stages)
+        self.assertIn("5002:3h", stages)
+
+        # Повторный запуск: НЕ должно отправлять повторно (идемпотентность)
+        mock_send.reset_mock()
+        with patch("main.fetch_mlbl_games", return_value=fake_games):
+            with patch("main.time.sleep", side_effect=[None, InterruptedError]):
+                try:
+                    main.reminder_loop()
+                except InterruptedError:
+                    pass
+
+        mock_send.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()
