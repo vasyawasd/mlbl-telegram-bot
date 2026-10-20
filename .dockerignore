@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+chats.json
+chats.json.bak
+chats.json.tmp
+.bot.lock
+.bot.pid
+test_*.py
+README.md

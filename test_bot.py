@@ -515,6 +515,28 @@ class TestMlblBot(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 2)
         self.assertNotIn("parse_mode", mock_post.call_args_list[1][1]["json"])
 
+    def test_markup_escaping_and_chunks(self):
+        card = main.format_card({
+            "team1": "A_B [test]", "team2": "C*D", "date_str": "18.10.2026",
+            "time_str": "19:00", "arena": "Hall_1", "form": "⚪️",
+        }, title="Match*", div_name="Div_Name")
+        self.assertIn("A\\_B \\[test\\]", card)
+        self.assertIn("C\\*D", card)
+        chunks = main.split_message_chunks("word " * 30, limit=17)
+        self.assertTrue(all(len(chunk) <= 17 for chunk in chunks))
+        self.assertEqual(" ".join(" ".join(chunks).split()), " ".join(("word " * 30).split()))
+
+    @patch("main.time.sleep")
+    @patch("main.requests.post")
+    def test_send_retries_are_bounded(self, mock_post, mock_sleep):
+        response = MagicMock()
+        response.status_code = 500
+        response.json.return_value = {"ok": False, "error_code": 500}
+        mock_post.return_value = response
+        self.assertIsNone(main.send_msg("12345", "retry"))
+        self.assertEqual(mock_post.call_count, main.SEND_MAX_ATTEMPTS)
+        self.assertEqual(mock_sleep.call_count, main.SEND_MAX_ATTEMPTS - 1)
+
 class TestMlblResilience(unittest.TestCase):
     def setUp(self):
         import tempfile
@@ -564,6 +586,76 @@ class TestMlblResilience(unittest.TestCase):
         mid = main.send_msg("12345", "Привет")
         self.assertEqual(mid, 999)
         mock_sleep.assert_called_with(3.0)
+
+    def test_update_offset_persists(self):
+        old_offset_file = main.OFFSET_FILE
+        main.OFFSET_FILE = os.path.join(self.test_dir, "update_offset.json")
+        try:
+            self.assertEqual(main.load_update_offset(), 0)
+            main.save_update_offset(42)
+            self.assertEqual(main.load_update_offset(), 42)
+        finally:
+            main.OFFSET_FILE = old_offset_file
+
+    def test_settings_uses_absolute_data_directory_and_env_precedence(self):
+        script_dir = os.path.join(self.test_dir, "script")
+        os.makedirs(script_dir)
+        with open(os.path.join(script_dir, ".env"), "w", encoding="utf-8") as handle:
+            handle.write("BOT_TOKEN=from-file\\nPORT=99999\\nBOT_DATA_DIR=relative-data\\n")
+        settings = main.Settings.from_environment(
+            {"BOT_TOKEN": "from-env", "PORT": "1234", "BOT_DATA_DIR": "state"},
+            main.Path(script_dir),
+        )
+        self.assertEqual(settings.token, "from-env")
+        self.assertEqual(settings.port, 1234)
+        self.assertTrue(settings.data_dir.is_absolute())
+        self.assertEqual(settings.data_dir, main.Path(script_dir).resolve() / "state")
+
+    def test_health_and_readiness_contracts(self):
+        self.assertEqual(main.health_status()[0], 200)
+        old_token = main.TOKEN
+        old_started = main.SERVICE_STARTED.is_set()
+        old_stopping = main.STOP_EVENT.is_set()
+        old_poll_success = main.LAST_POLL_SUCCESS_AT
+        try:
+            main.TOKEN = ""
+            self.assertEqual(main.readiness_status()[0], 503)
+            main.TOKEN = "configured"
+            main.STOP_EVENT.clear()
+            main.SERVICE_STARTED.clear()
+            self.assertEqual(main.readiness_status()[0], 503)
+            main.SERVICE_STARTED.set()
+            main.LAST_POLL_SUCCESS_AT = main.time.monotonic()
+            self.assertEqual(main.readiness_status()[0], 200)
+            main.LAST_POLL_SUCCESS_AT = main.time.monotonic() - main.HEALTH_STALE_AFTER_SEC - 1
+            self.assertEqual(main.readiness_status()[0], 503)
+            main.LAST_POLL_SUCCESS_AT = main.time.monotonic()
+            main.STOP_EVENT.set()
+            self.assertEqual(main.readiness_status()[0], 503)
+        finally:
+            main.TOKEN = old_token
+            main.LAST_POLL_SUCCESS_AT = old_poll_success
+            if old_started:
+                main.SERVICE_STARTED.set()
+            else:
+                main.SERVICE_STARTED.clear()
+            if old_stopping:
+                main.STOP_EVENT.set()
+            else:
+                main.STOP_EVENT.clear()
+
+    def test_cache_stale_data_has_bounded_age(self):
+        main.CAL_CACHE[1] = [{"id": 1}]
+        try:
+            now = 1000.0
+            main.CAL_CACHE_TIME[1] = now - main.CACHE_TTL_SEC - 1
+            self.assertIsNone(main._cached_games(1, now, allow_stale=False))
+            self.assertEqual(main._cached_games(1, now, allow_stale=True), [{"id": 1}])
+            main.CAL_CACHE_TIME[1] = now - main.CACHE_MAX_STALE_SEC - 1
+            self.assertIsNone(main._cached_games(1, now, allow_stale=True))
+        finally:
+            main.CAL_CACHE.pop(1, None)
+            main.CAL_CACHE_TIME.pop(1, None)
 
     @patch("main.requests.post")
     def test_send_msg_403_kicked_disables_chat(self, mock_post):

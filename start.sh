@@ -1,19 +1,17 @@
-#!/usr/bin/env bash
-# Неубиваемый запуск Telegram-бота МЛБЛ с супервизором и защитой от сна
-set -e
-cd "$(dirname "$0")"
+#!/usr/bin/env sh
+# Launch only the supervisor. It owns the Termux wake lock and child lifecycle.
+set -eu
 
-# Включение wake-lock для Termux (предотвращает сон процессора Android при выключенном экране)
-if command -v termux-wake-lock &> /dev/null; then
-    echo "🔋 [Termux] Активация termux-wake-lock..."
-    termux-wake-lock
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$SCRIPT_DIR"
+
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN=python3
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN=python
+else
+    echo "Python 3 is required but was not found on PATH." >&2
+    exit 127
 fi
 
-# Определение интерпретатора Python
-PYTHON_BIN="python3"
-if ! command -v python3 &> /dev/null; then
-    PYTHON_BIN="python"
-fi
-
-echo "🚀 Запуск неубиваемого супервизора МЛБЛ бота..."
-exec $PYTHON_BIN supervisor.py
+exec "$PYTHON_BIN" "$SCRIPT_DIR/supervisor.py"

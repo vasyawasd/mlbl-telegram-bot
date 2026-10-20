@@ -1,5 +1,22 @@
+# Bytecode and test/tool caches
 __pycache__/
-*.pyc
-*.pyo
-chats.json
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local runtime state
 .env
+.env.*
+!.env.example
+chats.json
+chats.json.bak
+chats.json.tmp
+.bot.lock
+.bot.pid
+
+# Local virtual environments and editor files
+.venv/
+venv/
+.idea/
+.vscode/
